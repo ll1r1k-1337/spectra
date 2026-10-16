@@ -1,0 +1,31 @@
+{
+  "systemName": "Spectra Autonomous Runtime",
+  "database": {
+    "connectionString": "postgresql://spectra:spectra_password@localhost:5432/spectra_db",
+    "embeddingDimension": 384
+  },
+  "embeddings": {
+    "provider": "transformers.js",
+    "modelName": "Xenova/multilingual-e5-small",
+    "cacheDir": "./.cache/transformers",
+    "modalityWeights": [0.5, 0.3, 0.2]
+  },
+  "system1": {
+    "provider": "laya-onnx",
+    "confidenceThreshold": 0.7,
+    "driftTolerance": 0.35
+  },
+  "system2": {
+    "provider": "langchain",
+    "modelName": "gpt-4o",
+    "lightModelName": "gpt-4o-mini",
+    "temperature": 0.2,
+    "maxTokens": 2048
+  },
+  "runtime": {
+    "maxSteps": 30,
+    "rhoMax": 1,
+    "lMax": 5,
+    "initialLyapunovBank": 15.0
+  }
+}

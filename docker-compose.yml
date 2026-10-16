@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: spectra_pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: spectra
+      POSTGRES_PASSWORD: spectra_password
+      POSTGRES_DB: spectra_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/001_init_pgvector.sql:/docker-entrypoint-initdb.d/001_init_pgvector.sql:ro
+
+volumes:
+  pgdata:

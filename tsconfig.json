@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "declaration": false,
+    "emitDeclarationOnly": false,
+    "strict": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "#types": ["./types/index.d.ts"],
+      "#types/*": ["./types/*"]
+    },
+    "types": ["node"]
+  },
+  "include": ["bin/**/*.js", "src/**/*.js", "types/**/*.d.ts"]
+}

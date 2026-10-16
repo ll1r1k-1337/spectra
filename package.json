@@ -1,0 +1,35 @@
+{
+  "name": "spectra-autonomous-cli",
+  "version": "0.1.0",
+  "description": "Continual Self-Learning Graph AI Runtime with System-1/System-2 Arbitrage",
+  "type": "module",
+  "main": "./src/core/runtime.js",
+  "types": "./types/index.d.ts",
+  "bin": {
+    "spectra": "./bin/spectra.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/**/*.test.js",
+    "db:up": "node scripts/db-up.js",
+    "db:down": "podman compose down 2>/dev/null || docker compose down",
+    "init": "node ./bin/spectra.js init",
+    "start": "node ./bin/spectra.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.1.0",
+    "@langchain/core": "^0.3.15",
+    "@langchain/openai": "^0.3.12",
+    "@receptron/laya": "^0.1.2",
+    "pg": "^8.13.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
