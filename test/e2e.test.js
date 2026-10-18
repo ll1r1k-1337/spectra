@@ -113,6 +113,8 @@ test('Spectra Real E2E (No Mocks): Real LLM Synthesis -> pgvector Experience Rep
       ['MEMORY_GROUNDED', 'SYSTEM2_SYNTHESIZED'].includes(res2.appliedMutations[0].source),
       'Восстановление обязано прийти из pgvector или от System-2'
     );
+    // NOTE: Прецеденты теперь сохраняются в pgvector отложенно — только при успешном
+    // достижении цели (см. pendingPrecedents в runSession). Живое поведение LLM/DB предполагается.
 
     // =========================================================================
     // ЭТАП 3: Реальная верификация и исполнение Saga-компенсатора в песочнице node:vm
@@ -195,9 +197,9 @@ test('Spectra Real E2E (No Mocks): Real LLM Synthesis -> pgvector Experience Rep
     runtime2.graph.addEdge(
       'start',
       'solver_duplicate_branch',
-      runtime2.graph.compileGuardExpression('!Boolean(Array.isArray(state.artifacts) && state.artifacts.length > 0)'),
+      runtime2.graph.compileGuardExpression('!((Array.isArray(state.artifacts) ? state.artifacts.length > 0 : Boolean(state.artifacts)))'),
       2,
-      { expr: '!Boolean(Array.isArray(state.artifacts) && state.artifacts.length > 0)' }
+      { expr: '!((Array.isArray(state.artifacts) ? state.artifacts.length > 0 : Boolean(state.artifacts)))' }
     );
     runtime2.graph.addEdge('solver_duplicate_branch', 'verify_goal_state', () => true, 1, {
       expr: 'true /* reverify_check */'

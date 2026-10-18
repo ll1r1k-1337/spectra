@@ -74,6 +74,46 @@ export class SpectraRuntime {
   }
 
   /**
+   * После ремонта CHECK_FAILED новый узел должен вернуть управление в узел-предшественник,
+   * если тот (напр. persist_artifacts) читает ключи, которые производит новый узел, —
+   * иначе запись на диск будет пропущена и проверка снова упадёт.
+   * @param {string | null} predecessorNodeId
+   * @param {string} failedNodeId
+   * @param {string[]} newNodeWrites
+   * @returns {string}
+   */
+  _resolveReverifyTarget(predecessorNodeId, failedNodeId, newNodeWrites) {
+    const predecessor = predecessorNodeId ? this.graph.nodes.get(predecessorNodeId) : null;
+    if (
+      predecessor &&
+      predecessor.type === 'tool' &&
+      (predecessor.reads || []).some((k) => newNodeWrites.includes(k))
+    ) {
+      return predecessor.id;
+    }
+    return failedNodeId;
+  }
+
+  /**
+   * Преемптивный guard: сработать, ПОКА новые результаты узла отсутствуют.
+   * Строим только по ключам, которые новый узел пишет и которые читает check
+   * (не инвертируем список ошибок вида syntaxErrors — «пустой список ошибок» = успех).
+   * @param {string} checkNodeId
+   * @param {string[]} newNodeWrites
+   * @returns {string}
+   */
+  _buildPreemptiveGuard(checkNodeId, newNodeWrites) {
+    const checkNode = this.graph.nodes.get(checkNodeId);
+    const checkReads = checkNode?.reads && checkNode.reads.length > 0 ? checkNode.reads : ['artifacts'];
+    let produceKeys = (newNodeWrites || []).filter((k) => checkReads.includes(k));
+    if (produceKeys.length === 0) produceKeys = newNodeWrites && newNodeWrites.length > 0 ? newNodeWrites : checkReads;
+    const readyExpr = produceKeys
+      .map((k) => `(Array.isArray(state.${k}) ? state.${k}.length > 0 : Boolean(state.${k}))`)
+      .join(' && ');
+    return `!(${readyExpr})`;
+  }
+
+  /**
    * @param {string} nodeId
    * @param {StateObject} state
    */
@@ -235,6 +275,10 @@ export class SpectraRuntime {
     /** @type {SessionRunResult['appliedMutations']} */
     const appliedMutations = [];
     let rollbacksCount = 0;
+    /** @type {Array<{ record: PrecedentRecord, deadlock: DeadlockIncident }>} */
+    const pendingPrecedents = [];
+    /** @type {Set<string>} */
+    const repairedCheckNodes = new Set();
 
     this.logger.banner(
       `ЗАПУСК СЕССИИ SPECTRA (${this.logger.sessionId})`,
@@ -355,6 +399,16 @@ export class SpectraRuntime {
         if (this.precedentStore) {
           await this.precedentStore.saveOntologyKeys(this.ontology.toJSON());
         }
+        if (this.precedentStore && pendingPrecedents.length > 0) {
+          for (const p of pendingPrecedents) {
+            await this.precedentStore.savePrecedent(p.record, p.deadlock);
+          }
+          await this.precedentStore.saveGraphVersion(
+            this.graph.toJSON(),
+            this.graph.computeStructuralHash(),
+            ver.omegaPenalty
+          );
+        }
         const durationMs = Number((performance.now() - startTimeMs).toFixed(2));
         this.logger.banner(
           `🏁 ЦЕЛЬ ДОСТИГНУТА НА УЗЛЕ "${currentNodeId}" ЗА ${step + 1} ШАГ(ОВ)`,
@@ -438,12 +492,14 @@ export class SpectraRuntime {
         ? await this.precedentStore.searchSimilarPrecedents(deadlock.type, incidentVector, 0.65)
         : undefined;
 
-      const grounded = this.findRelationallyGroundedPrecedent(
-        deadlock.type,
-        currentNodeId,
-        incidentVector,
-        vectorCandidates
-      );
+      const grounded = repairedCheckNodes.has(currentNodeId)
+        ? null
+        : this.findRelationallyGroundedPrecedent(
+            deadlock.type,
+            currentNodeId,
+            incidentVector,
+            vectorCandidates
+          );
       /** @type {'MEMORY_GROUNDED' | 'SYSTEM2_SYNTHESIZED'} */
       let mutationSource = 'SYSTEM2_SYNTHESIZED';
       /** @type {MutationPlan} */
@@ -567,10 +623,13 @@ export class SpectraRuntime {
         candidateGraph.addNode(mutationPlan.node);
 
         if (deadlock.type === 'CHECK_FAILED' && deadlock.lastValidNodeId) {
-          const checkReads = node?.reads && node.reads.length > 0 ? node.reads : ['artifacts'];
-          const preGuardExpr = checkReads
-          .map((k) => `!(Array.isArray(state.${k}) ? state.${k}.length > 0 : Boolean(state.${k}))`)
-          .join(' || ');
+          const newNodeWrites = mutationPlan.node.writes || [];
+          const preGuardExpr = this._buildPreemptiveGuard(deadlock.nodeId, newNodeWrites);
+          const reverifyTargetId = this._resolveReverifyTarget(
+            deadlock.lastValidNodeId,
+            deadlock.nodeId,
+            newNodeWrites
+          );
           candidateGraph.addEdge(
             deadlock.lastValidNodeId,
             mutationPlan.node.id,
@@ -578,8 +637,11 @@ export class SpectraRuntime {
             0,
             { expr: preGuardExpr, preemptive: true }
           );
-          candidateGraph.addEdge(mutationPlan.node.id, deadlock.nodeId, () => true, 1, {
-            expr: 'true /* reverify_check */'
+          candidateGraph.addEdge(mutationPlan.node.id, reverifyTargetId, () => true, 1, {
+            expr:
+              reverifyTargetId === deadlock.nodeId
+                ? 'true /* reverify_check */'
+                : `true /* re-run ${reverifyTargetId} */`
           });
         } else {
           const goalNodeId = Array.from(candidateGraph.goalNodes)[0] || 'goal';
@@ -632,15 +694,10 @@ export class SpectraRuntime {
         if (mutationSource === 'SYSTEM2_SYNTHESIZED') {
           this.precedentMemory.push(precedentRecord);
         }
+        if (this.precedentStore && mutationSource === 'SYSTEM2_SYNTHESIZED') {
+          pendingPrecedents.push({ record: precedentRecord, deadlock });
+        }
         if (this.precedentStore) {
-          if (mutationSource === 'SYSTEM2_SYNTHESIZED') {
-            await this.precedentStore.savePrecedent(precedentRecord, deadlock);
-          }
-          await this.precedentStore.saveGraphVersion(
-            this.graph.toJSON(),
-            structHash,
-            checkResult.omegaPenalty
-          );
           await this.precedentStore.saveOntologyKeys(this.ontology.toJSON());
         }
 
@@ -654,6 +711,9 @@ export class SpectraRuntime {
           currentNodeId = mutationPlan.to;
         }
         stateHashCounts.clear();
+        if (deadlock.type === 'CHECK_FAILED') {
+          repairedCheckNodes.add(deadlock.nodeId);
+        }
 
         this.logger.info(
           'SLOW_LOOP',

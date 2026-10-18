@@ -129,7 +129,7 @@ export class LangChainSystem2Arbiter {
     const shape = {};
     for (const wKey of node.writes) {
       shape[wKey] = wKey === 'artifacts'
-        ? z.array(z.object({ name: z.string(), content: z.string() }))
+        ? z.array(z.object({ name: z.string(), content: z.string() })).min(1)
         : z.union([z.string(), z.number(), z.boolean()]);
     }
     const OutputSchema = z.object(shape);
@@ -140,6 +140,15 @@ export class LangChainSystem2Arbiter {
       node.config?.prompt ||
       `Compute output keys [${node.writes.join(', ')}] given input state ${JSON.stringify(inputSlice)}.`;
 
-    return await structured.invoke(promptText);
+    const out = await structured.invoke(promptText);
+    if (node.writes.includes('artifacts')) {
+      const arts = /** @type {any} */ (out)?.artifacts;
+      if (!Array.isArray(arts) || arts.length === 0) {
+        throw new Error(
+          `LLM node "${node.id}" вернул пустой artifacts[] для цели "${String(state.goal || '')}" — требуется минимум один { name, content }`
+        );
+      }
+    }
+    return out;
   }
 }
