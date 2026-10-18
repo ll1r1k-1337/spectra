@@ -1,22 +1,38 @@
+// @ts-check
+
 /**
- * StateOntologyManager maintains the evolving state space K_t,
- * alias resolution with Union-Find Tarjan path compression,
- * and staging garbage collection based on mutual information gain.
+ * @typedef {import('../../types/index.js').IStateOntologyManager} IStateOntologyManager
+ * @typedef {import('../../types/index.js').SerializedOntologyKey} SerializedOntologyKey
+ */
+
+/**
+ * @implements {IStateOntologyManager}
  */
 export class StateOntologyManager {
   /**
-   * @param {number} [stagingTtlEpochs=5]
+   * @param {number} [stagingTtlEpochs]
    */
-  constructor(stagingTtlEpochs = 5) {
-    /** @type {Map<string, { canonicalAlias?: string, status?: 'STAGING' | 'CANONICAL', mutualInfoGain?: number, epochsLived?: number }>} */
+  constructor(stagingTtlEpochs = 2) {
+    /** @type {Map<string, { status: 'STAGING' | 'CANONICAL'; canonicalAlias?: string; epochsLived: number; mutualInfoGain: number }>} */
     this.keys = new Map();
-    /** @type {number} */
     this.stagingTtlEpochs = stagingTtlEpochs;
   }
 
   /**
-   * Find the canonical key name using Tarjan path compression (Union-Find).
-   *
+   * @param {string} keyName
+   * @param {number} [mutualInfoGain]
+   */
+  registerStagingKey(keyName, mutualInfoGain = 0.15) {
+    if (!this.keys.has(keyName)) {
+      this.keys.set(keyName, {
+        status: 'STAGING',
+        epochsLived: 0,
+        mutualInfoGain
+      });
+    }
+  }
+
+  /**
    * @param {string} keyName
    * @returns {string}
    */
@@ -29,34 +45,31 @@ export class StateOntologyManager {
   }
 
   /**
-   * Merge two keys by pointing synonym root to canonical root.
-   *
    * @param {string} canonicalKey
    * @param {string} synonymKey
-   * @returns {string} canonical root
+   * @returns {string}
    */
   mergeKeys(canonicalKey, synonymKey) {
     const rootA = this.findCanonical(canonicalKey);
     const rootB = this.findCanonical(synonymKey);
+    if (!this.keys.has(rootA)) {
+      this.keys.set(rootA, { status: 'CANONICAL', epochsLived: 0, mutualInfoGain: 1.0 });
+    }
     if (rootA !== rootB) {
-      const entryB = this.keys.get(rootB);
-      if (entryB) {
-        entryB.canonicalAlias = rootA;
-      } else {
-        this.keys.set(rootB, { canonicalAlias: rootA });
-      }
+      const existingB = this.keys.get(rootB) || { status: 'STAGING', epochsLived: 0, mutualInfoGain: 0 };
+      existingB.canonicalAlias = rootA;
+      this.keys.set(rootB, existingB);
     }
     return rootA;
   }
 
   /**
-   * Run garbage collection for staging keys. Promotes to CANONICAL if mutualInfoGain >= thetaIg,
-   * evicts if lived >= stagingTtlEpochs.
-   *
-   * @param {number} [thetaIg=0.10]
-   * @returns {string[]} evicted key names
+   * @param {number} [thetaIg]
+   * @returns {{ promoted: string[]; evicted: string[] }}
    */
-  runStagingGarbageCollection(thetaIg = 0.10) {
+  runStagingGarbageCollection(thetaIg = 0.1) {
+    /** @type {string[]} */
+    const promoted = [];
     /** @type {string[]} */
     const evicted = [];
     for (const [k, meta] of this.keys.entries()) {
@@ -64,12 +77,40 @@ export class StateOntologyManager {
         meta.epochsLived = (meta.epochsLived || 0) + 1;
         if ((meta.mutualInfoGain || 0) >= thetaIg) {
           meta.status = 'CANONICAL';
+          promoted.push(k);
         } else if (meta.epochsLived >= this.stagingTtlEpochs) {
           this.keys.delete(k);
           evicted.push(k);
         }
       }
     }
-    return evicted;
+    return { promoted, evicted };
+  }
+
+  /**
+   * @returns {SerializedOntologyKey[]}
+   */
+  toJSON() {
+    return Array.from(this.keys.entries()).map(([keyName, meta]) => ({
+      keyName,
+      status: meta.status,
+      canonicalAlias: meta.canonicalAlias,
+      epochsLived: meta.epochsLived,
+      mutualInfoGain: meta.mutualInfoGain
+    }));
+  }
+
+  /**
+   * @param {SerializedOntologyKey[]} entries
+   */
+  loadFromJSON(entries) {
+    for (const item of entries || []) {
+      this.keys.set(item.keyName, {
+        status: item.status,
+        canonicalAlias: item.canonicalAlias,
+        epochsLived: item.epochsLived,
+        mutualInfoGain: item.mutualInfoGain
+      });
+    }
   }
 }

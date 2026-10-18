@@ -10,12 +10,7 @@
     "emitDeclarationOnly": false,
     "strict": true,
     "skipLibCheck": true,
-    "baseUrl": ".",
-    "paths": {
-      "#types": ["./types/index.d.ts"],
-      "#types/*": ["./types/*"]
-    },
     "types": ["node"]
   },
-  "include": ["bin/**/*.js", "src/**/*.js", "types/**/*.d.ts"]
+  "include": ["bin/**/*.js", "src/**/*.js", "test/**/*.js", "types/**/*.d.ts"]
 }

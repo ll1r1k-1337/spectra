@@ -1,11 +1,12 @@
+# docker-compose.yml
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: docker.io/pgvector/pgvector:pg16
     container_name: spectra_pgvector
     restart: unless-stopped
     environment:
       POSTGRES_USER: spectra
-      POSTGRES_PASSWORD: spectra_password
+      POSTGRES_PASSWORD: spectra_pass
       POSTGRES_DB: spectra_db
     ports:
       - "5432:5432"

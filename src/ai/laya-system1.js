@@ -1,185 +1,139 @@
+// src/ai/laya-system1.js
 // @ts-check
-import { logger } from '../utils/logger.js';
+import { Laya } from '@receptron/laya';
 
 /**
- * @typedef {import('../../types/ai.js').ILayaSystem1Arbiter} ILayaSystem1Arbiter
- * @typedef {import('../../types/domain.js').DeadlockIncident} DeadlockIncident
- * @typedef {import('../../types/domain.js').MutationPlan} MutationPlan
- * @typedef {import('../../types/domain.js').System1Verdict} System1Verdict
- * @typedef {import('../../types/domain.js').SpectraConfig} SpectraConfig
+ * @typedef {import('../../types/index.js').ILayaSystem1Arbiter} ILayaSystem1Arbiter
+ * @typedef {import('../../types/index.js').SpectraConfig} SpectraConfig
+ * @typedef {import('../../types/index.js').DeadlockIncident} DeadlockIncident
+ * @typedef {import('../../types/index.js').MutationPlan} MutationPlan
+ * @typedef {import('../../types/index.js').System1Verdict} System1Verdict
  */
 
 /**
+ * Реальный локальный арбитр System-1 на базе @receptron/laya (ONNX Runtime).
+ * Использует официальный API Laya.load() и laya.systemOne(state, questions) с типами score, noul и choice.
  * @implements {ILayaSystem1Arbiter}
  */
 export class LayaSystem1Arbiter {
   /**
-   * @param {Partial<SpectraConfig['system1']> & Record<string, any>} [config]
+   * @param {SpectraConfig['system1']} config
    */
-  constructor(config = {}) {
-    /** @type {SpectraConfig['system1']} */
-    this.config = {
-      provider: 'laya-onnx',
-      confidenceThreshold: config.confidenceThreshold ?? 0.7,
-      driftTolerance: config.driftTolerance ?? 0.35
-    };
-    this.maxDrift = config.maxDrift ?? this.config.driftTolerance;
-    this.minCoherence = config.minCoherence ?? 0.65;
-    this.minApproveProb = config.minApproveProb ?? this.config.confidenceThreshold;
-    this.temperaturePlatt = config.temperaturePlatt ?? 1.0;
+  constructor(config) {
+    this.config = config;
     /** @type {any} */
     this.laya = null;
-    this.initialized = false;
   }
 
-  /**
-   * Initializes Laya ONNX runtime or marks offline for heuristic fallback.
-   * @returns {Promise<void>}
-   */
   async init() {
-    if (this.initialized) {
-      return;
+    if (this.laya) return this;
+    /** @type {Record<string, any>} */
+    const loadOpts = {
+      cacheDir: this.config.cacheDir || './.spectra/laya-cache',
+      executionProviders: ['cpu']
+    };
+    if (this.config.modelDir) {
+      loadOpts.modelDir = this.config.modelDir;
     }
-    try {
-      const { Laya } = await import('@receptron/laya');
-      this.laya = await Laya.load();
-    } catch {
-      this.laya = null;
+    if (this.config.hfToken) {
+      loadOpts.token = this.config.hfToken;
     }
-    this.initialized = true;
+    this.laya = await Laya.load(loadOpts);
+    return this;
   }
 
   /**
-   * Evaluates proposed mutation against current deadlock and system goal.
+   * Выполняет единый батч-проход ONNX-модели Laya (systemOne) для оценки риска дрейфа,
+   * связности с целью, калиброванной вероятности одобрения noul P(true) и стратегии отката.
    * @param {DeadlockIncident} deadlock
    * @param {MutationPlan} mutationPlan
    * @param {string} goalDescription
    * @returns {Promise<System1Verdict>}
    */
   async evaluateMutation(deadlock, mutationPlan, goalDescription) {
-    if (!this.initialized) {
-      await this.init();
-    }
+    await this.init();
+    const t0 = performance.now();
 
-    logger.debug('Laya', 'Extracted input features for System-1 evaluation', {
+    const hasValidContract = Boolean(
+      (mutationPlan.node && mutationPlan.node.writes.length > 0) || mutationPlan.operator === 'addEdge'
+    );
+
+    const statePayload = {
+      goal: goalDescription.slice(0, 160),
       deadlockType: deadlock.type,
-      nodeId: deadlock.nodeId,
-      mutationOperator: mutationPlan.operator,
-      goal: goalDescription,
-      reads: Object.keys(deadlock.stateSnapshot || {}),
-      reasoning: mutationPlan.reasoning
+      deadlockNode: deadlock.nodeId,
+      operator: mutationPlan.operator,
+      from: mutationPlan.from,
+      to: mutationPlan.to,
+      newNodeId: mutationPlan.node?.id || null,
+      writes: mutationPlan.node?.writes || [],
+      contractVerified: hasValidContract,
+      sandboxedExecution: true,
+      reasoning: (mutationPlan.reasoning || '').slice(0, 200)
+    };
+
+    const result = await this.laya.systemOne(statePayload, {
+      drift_risk: {
+        type: 'score',
+        instructions: 'How severe is the topological or semantic drift risk of this graph mutation?',
+        criteria: ['minimal drift', 'low drift', 'moderate drift', 'severe drift']
+      },
+      coherence: {
+        type: 'score',
+        instructions: 'How well does this mutation align with reaching the session goal?',
+        criteria: ['incoherent', 'weakly coherent', 'coherent', 'highly coherent']
+      },
+      approve_mutation: {
+        type: 'noul',
+        instructions: 'Is this graph mutation safe, well-typed, and likely to resolve the deadlock?'
+      },
+      rollback_action: {
+        type: 'choice',
+        instructions: 'Which rollback action is appropriate if the mutation is unsafe?',
+        criteria: {
+          keep: 'keep state and apply mutation',
+          rollback_last: 'undo the last node transition',
+          rollback_session: 'abort and rollback entire session'
+        }
+      }
     });
 
-    if (this.laya) {
-      try {
-        logger.info('Laya', 'Evaluating mutation using ONNX model path');
-        const result = await this.laya.systemOne(
-          { deadlock, mutationPlan, goal: goalDescription },
-          {
-            drift: {
-              type: 'score',
-              instructions: 'Assess potential hallucination or behavioral drift risk of the mutation',
-              criteria: ['minimal', 'moderate', 'high', 'critical']
-            },
-            coherence: {
-              type: 'score',
-              instructions: 'Assess causal and structural coherence with the target goal',
-              criteria: ['none', 'low', 'moderate', 'high']
-            },
-            approve: {
-              type: 'noul',
-              instructions: 'Approve this mutation plan for execution?'
-            }
-          }
-        );
+    // В @receptron/laya ответ score лежит в [0..3] (4 уровня рубрики)
+    const rawDriftScore = Number(result.answers.drift_risk.score);
+    const rawCoherenceScore = Number(result.answers.coherence.score);
+    const rawNoulProb = Math.min(1 - 1e-6, Math.max(1e-6, Number(result.answers.approve_mutation.noul)));
 
-        const driftRisk = Number((result.drift.score / 3).toFixed(4));
-        const coherence = Number((result.coherence.score / 3).toFixed(4));
-        const approveProb = Number(result.approve.noul.toFixed(4));
-        const approved =
-          driftRisk <= this.maxDrift &&
-          coherence >= this.minCoherence &&
-          approveProb >= this.minApproveProb;
+    const driftRisk = Number((rawDriftScore / 3).toFixed(4));
+    const coherence = Number((rawCoherenceScore / 3).toFixed(4));
 
-        /** @type {'keep' | 'rollback_last' | 'rollback_session'} */
-        const rollbackAction = approved ? 'keep' : driftRisk > 0.65 ? 'rollback_session' : 'rollback_last';
-
-        logger.info('Laya', `System-1 evaluation (ONNX): P(approve)=${approveProb}, driftRisk=${driftRisk}, coherence=${coherence}, approved=${approved}`);
-        logger.debug('Laya', 'Calibrated System-1 ONNX verdict details', {
-          verdict: { driftRisk, coherence, approveProb, approved, rollbackAction }
-        });
-
-        return {
-          driftRisk,
-          coherence,
-          approveProb,
-          approved,
-          rollbackAction,
-          selectedPrecedentId: null
-        };
-      } catch (err) {
-        logger.warn('Laya', `ONNX evaluation failed: ${err instanceof Error ? err.message : String(err)}; falling back to heuristic evaluation`);
-      }
-    }
-
-    return this.evaluateHeuristic(deadlock, mutationPlan, goalDescription);
-  }
-
-  /**
-   * Deterministic heuristic scoring based on configured thresholds.
-   * @param {DeadlockIncident} deadlock
-   * @param {MutationPlan} mutationPlan
-   * @param {string} _goalDescription
-   * @returns {System1Verdict}
-   */
-  evaluateHeuristic(deadlock, mutationPlan, _goalDescription) {
-    logger.info('Laya', 'Evaluating mutation using heuristic fallback path (ONNX runtime offline)');
-    let driftRisk = 0.12;
-    let coherence = 0.88;
-
-    if (mutationPlan.operator === 'patchToolAST') {
-      driftRisk += 0.12;
-    } else if (mutationPlan.operator === 'splitNode') {
-      driftRisk += 0.08;
-    } else if (mutationPlan.operator === 'addNodeAndBridge') {
-      driftRisk += 0.04;
-    }
-
-    if (mutationPlan.reasoning && mutationPlan.reasoning.length > 10) {
-      coherence += 0.05;
-    }
-
-    if (mutationPlan.to === 'goal' || mutationPlan.from === deadlock.nodeId) {
-      coherence += 0.04;
-    }
-
-    driftRisk = Math.min(0.95, Math.max(0.05, Number(driftRisk.toFixed(4))));
-    coherence = Math.min(0.99, Math.max(0.05, Number(coherence.toFixed(4))));
-
-    const temp = this.temperaturePlatt || 1.0;
-    const logit = (coherence - driftRisk) / temp;
-    const approveProb = Math.min(0.99, Math.max(0.01, Number((1 / (1 + Math.exp(-2.5 * logit))).toFixed(4))));
+    // Температурное масштабирование Платта T_cal над логитом noul
+    const temp = Math.max(0.1, this.config.temperaturePlatt || 1.0);
+    const logit = Math.log(rawNoulProb / (1 - rawNoulProb));
+    const approveProb = Number((1 / (1 + Math.exp(-logit / temp))).toFixed(4));
 
     const approved =
-      driftRisk <= this.maxDrift &&
-      coherence >= this.minCoherence &&
-      approveProb >= this.minApproveProb;
+      driftRisk <= this.config.maxDrift &&
+      coherence >= this.config.minCoherence &&
+      approveProb >= this.config.minApproveProb;
 
-    /** @type {'keep' | 'rollback_last' | 'rollback_session'} */
-    const rollbackAction = approved ? 'keep' : driftRisk > 0.65 ? 'rollback_session' : 'rollback_last';
-
-    logger.info('Laya', `System-1 evaluation (heuristic): P(approve)=${approveProb}, driftRisk=${driftRisk}, coherence=${coherence}, approved=${approved}`);
-    logger.debug('Laya', 'Calibrated System-1 heuristic verdict details', {
-      verdict: { driftRisk, coherence, approveProb, approved, rollbackAction }
-    });
+    const chosenRollback = /** @type {'keep' | 'rollback_last' | 'rollback_session'} */ (
+      result.answers.rollback_action.choice
+    );
 
     return {
       driftRisk,
       coherence,
       approveProb,
       approved,
-      rollbackAction,
-      selectedPrecedentId: null
+      rollbackAction: approved ? 'keep' : chosenRollback === 'keep' ? 'rollback_last' : chosenRollback,
+      latencyMs: Number((performance.now() - t0).toFixed(2))
     };
+  }
+
+  async close() {
+    if (this.laya && typeof this.laya.close === 'function') {
+      await this.laya.close();
+      this.laya = null;
+    }
   }
 }

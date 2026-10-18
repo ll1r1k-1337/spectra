@@ -1,7 +1,7 @@
 {
   "name": "spectra-autonomous-cli",
-  "version": "0.1.0",
-  "description": "Continual Self-Learning Graph AI Runtime with System-1/System-2 Arbitrage",
+  "version": "0.6.1",
+  "description": "Continual Self-Learning Graph AI Runtime with Real System-1/System-2 Arbitrage and Full Telemetry",
   "type": "module",
   "main": "./src/core/runtime.js",
   "types": "./types/index.d.ts",
@@ -9,12 +9,14 @@
     "spectra": "./bin/spectra.js"
   },
   "scripts": {
+    "start": "node ./bin/spectra.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/**/*.test.js",
-    "db:up": "node scripts/db-up.js",
-    "db:down": "podman compose down 2>/dev/null || docker compose down",
+    "test": "node --test ./test/e2e.test.js",
+    "db:up": "docker compose up -d",
+    "db:migrate": "docker compose exec -T postgres psql -U spectra -d spectra_db -f /docker-entrypoint-initdb.d/001_init_pgvector.sql",
     "init": "node ./bin/spectra.js init",
-    "start": "node ./bin/spectra.js"
+    "verify": "node ./bin/spectra.js verify",
+    "sleep": "node ./bin/spectra.js sleep"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.1.0",
@@ -29,7 +31,16 @@
     "@types/pg": "^8.11.10",
     "typescript": "^5.6.3"
   },
+  "overrides": {
+    "onnxruntime-node": "1.30.0"
+  },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.30.0": true,
+    "onnxruntime-node@1.21.0": true,
+    "protobufjs@7.6.6": true,
+    "sharp@0.34.5": true
   }
 }

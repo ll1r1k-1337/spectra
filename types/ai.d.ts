@@ -1,7 +1,13 @@
+// types/ai.d.ts
 import type {
+  DeadlockType,
   DeadlockIncident,
   MutationPlan,
   System1Verdict,
+  PrecedentRecord,
+  SerializedGraph,
+  SerializedOntologyKey,
+  GraphNodeSpec,
   StateObject,
   ModelTier,
   SpectraConfig
@@ -21,26 +27,39 @@ export interface ILocalEmbeddingEngine {
 
 export interface ILayaSystem1Arbiter {
   config: SpectraConfig['system1'];
-  init(): Promise<void>;
+  init(): Promise<this>;
   evaluateMutation(
     deadlock: DeadlockIncident,
     mutationPlan: MutationPlan,
     goalDescription: string
   ): Promise<System1Verdict>;
+  close(): Promise<void>;
 }
 
 export interface ILangChainSystem2Arbiter {
   config: SpectraConfig['system2'];
-  executeLlmNode(
-    promptTemplate: string,
-    state: StateObject,
-    writeKeys: string[],
-    tier?: ModelTier
-  ): Promise<StateObject>;
   synthesizeRecoveryMutation(
     deadlock: DeadlockIncident,
     goalDescription: string,
     existingNodeIds: string[],
     goalNodeId: string
   ): Promise<MutationPlan>;
+  executeLlmNode(node: GraphNodeSpec, state: StateObject, tier?: ModelTier): Promise<StateObject>;
+}
+
+export interface IPrecedentStore {
+  init(): Promise<void>;
+  loadAllPrecedents(): Promise<PrecedentRecord[]>;
+  searchSimilarPrecedents(
+    deadlockType: DeadlockType,
+    queryVector: number[],
+    minSimilarity?: number
+  ): Promise<PrecedentRecord[]>;
+  savePrecedent(record: PrecedentRecord, deadlock: DeadlockIncident): Promise<void>;
+  saveGraphVersion(graphJson: SerializedGraph, structuralHash: string, omegaPenalty: number): Promise<void>;
+  loadLatestGraph(): Promise<SerializedGraph | null>;
+  saveOntologyKeys(keys: SerializedOntologyKey[]): Promise<void>;
+  loadOntologyKeys(): Promise<SerializedOntologyKey[]>;
+  clearAll(): Promise<void>;
+  close(): Promise<void>;
 }

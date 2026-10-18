@@ -1,33 +1,26 @@
+// @ts-check
+
 /**
- * @typedef {import('#types').IDirectedGraph} IDirectedGraph
- * @typedef {import('#types').VerificationReport} VerificationReport
- * @typedef {import('#types').IGraphDeterminismVerifier} IGraphDeterminismVerifier
+ * @typedef {import('../../types/index.js').IGraphDeterminismVerifier} IGraphDeterminismVerifier
+ * @typedef {import('../../types/index.js').IDirectedGraph} IDirectedGraph
+ * @typedef {import('../../types/index.js').VerificationReport} VerificationReport
  */
 
 /**
- * Verifier for bounded determinism, transitive abstract interval interpretation (Invariant 2a),
- * topology complexity functional Omega(G), and amortized Lyapunov stability filter.
- *
  * @implements {IGraphDeterminismVerifier}
  */
 export class GraphDeterminismVerifier {
   /**
-   * @param {{ rhoMax?: number, lMax?: number, weights?: { l1: number, l2: number, l3: number, l4: number }, lyapunovCreditBankMax?: number }} [config={}]
+   * @param {{ rhoMax?: number; lMax?: number; lyapunovCreditBankMax?: number }} [config]
    */
   constructor(config = {}) {
-    /** @type {number} */
     this.rhoMax = config.rhoMax ?? 1.8;
-    /** @type {number} */
     this.lMax = config.lMax ?? 5;
-    /** @type {{ l1: number, l2: number, l3: number, l4: number }} */
-    this.weights = config.weights ?? { l1: 2.0, l2: 10.0, l3: 1.5, l4: 25.0 };
-    /** @type {number} */
+    this.weights = { l1: 2.0, l2: 10.0, l3: 1.5, l4: 25.0 };
     this.lyapunovCreditBank = config.lyapunovCreditBankMax ?? 15.0;
   }
 
   /**
-   * Statically verify all structural invariants of the graph.
-   *
    * @param {IDirectedGraph} graph
    * @returns {VerificationReport}
    */
@@ -38,7 +31,6 @@ export class GraphDeterminismVerifier {
 
     for (const [, list] of graph.edges) {
       E += list.length;
-      /** @type {Set<number>} */
       const seenPriorities = new Set();
       for (const edge of list) {
         if (seenPriorities.has(edge.priority)) priorityCollisions++;
@@ -85,18 +77,23 @@ export class GraphDeterminismVerifier {
     return {
       status: passed ? 'PASS' : 'HARD_REJECT',
       omegaPenalty: Number(omega.toFixed(4)),
-      diagnostics: { priorityCollisions, deadNodes, unsatNodes, trappingCycles }
+      diagnostics: {
+        vertexCount: V,
+        edgeCount: E,
+        density: Number(density.toFixed(3)),
+        priorityCollisions,
+        deadNodes,
+        unsatNodes,
+        trappingCycles
+      }
     };
   }
 
   /**
-   * Invariant 2a: Multi-step forward abstract interpretation of intervals
-   * threading constant key bounds through intermediate nodes.
-   *
    * @param {IDirectedGraph} graph
    * @param {Set<string>} reachable
    * @param {Set<string>} coReachable
-   * @returns {string[]} unsat node IDs
+   * @returns {string[]}
    */
   _checkTransitivePathSatisfiability(graph, reachable, coReachable) {
     /** @type {Map<string, Record<string, [number, number]>>} */
@@ -180,30 +177,6 @@ export class GraphDeterminismVerifier {
   }
 
   /**
-   * Verify amortized Lyapunov stability of energy functional V(G_t).
-   *
-   * @param {number} prevEnergy
-   * @param {number} nextEnergy
-   * @param {number} [deltaMin=0.5]
-   * @param {number} [maxBank=15.0]
-   * @returns {{ accepted: boolean, mode: 'STRICT_DISSIPATION' | 'PROVISIONAL_INVESTMENT' | 'REJECTED_BY_LYAPUNOV', deltaV: number, bank: number }}
-   */
-  verifyAmortizedLyapunovStability(prevEnergy, nextEnergy, deltaMin = 0.5, maxBank = 15.0) {
-    const deltaV = nextEnergy - prevEnergy;
-    if (deltaV <= -deltaMin) {
-      this.lyapunovCreditBank = Math.min(maxBank, this.lyapunovCreditBank + 0.5 * Math.abs(deltaV));
-      return { accepted: true, mode: 'STRICT_DISSIPATION', deltaV, bank: this.lyapunovCreditBank };
-    }
-    if (deltaV > 0 && deltaV <= this.lyapunovCreditBank) {
-      this.lyapunovCreditBank -= deltaV;
-      return { accepted: true, mode: 'PROVISIONAL_INVESTMENT', deltaV, bank: this.lyapunovCreditBank };
-    }
-    return { accepted: false, mode: 'REJECTED_BY_LYAPUNOV', deltaV, bank: this.lyapunovCreditBank };
-  }
-
-  /**
-   * Forward BFS reachability from starting node.
-   *
    * @param {IDirectedGraph} graph
    * @param {string | null} start
    * @returns {Set<string>}
@@ -224,8 +197,6 @@ export class GraphDeterminismVerifier {
   }
 
   /**
-   * Reverse BFS co-reachability from goal nodes.
-   *
    * @param {IDirectedGraph} graph
    * @param {Set<string>} goals
    * @returns {Set<string>}
@@ -236,8 +207,7 @@ export class GraphDeterminismVerifier {
     for (const [u, list] of graph.edges) {
       for (const e of list) {
         if (!rev.has(e.to)) rev.set(e.to, []);
-        const preds = rev.get(e.to);
-        if (preds) preds.push(u);
+        rev.get(e.to)?.push(u);
       }
     }
     /** @type {Set<string>} */
@@ -254,8 +224,6 @@ export class GraphDeterminismVerifier {
   }
 
   /**
-   * Tarjan's Strongly Connected Components algorithm.
-   *
    * @param {IDirectedGraph} graph
    * @param {Set<string>} subset
    * @returns {string[][]}
@@ -273,9 +241,7 @@ export class GraphDeterminismVerifier {
     /** @type {string[][]} */
     const sccs = [];
 
-    /**
-     * @param {string} v
-     */
+    /** @param {string} v */
     const strongConnect = (v) => {
       indices.set(v, index);
       lowlink.set(v, index);
@@ -287,9 +253,9 @@ export class GraphDeterminismVerifier {
         if (!subset.has(e.to)) continue;
         if (!indices.has(e.to)) {
           strongConnect(e.to);
-          lowlink.set(v, Math.min(/** @type {number} */ (lowlink.get(v)), /** @type {number} */ (lowlink.get(e.to))));
+          lowlink.set(v, Math.min(lowlink.get(v) ?? 0, lowlink.get(e.to) ?? 0));
         } else if (onStack.has(e.to)) {
-          lowlink.set(v, Math.min(/** @type {number} */ (lowlink.get(v)), /** @type {number} */ (indices.get(e.to))));
+          lowlink.set(v, Math.min(lowlink.get(v) ?? 0, indices.get(e.to) ?? 0));
         }
       }
 
@@ -299,11 +265,11 @@ export class GraphDeterminismVerifier {
         let w;
         do {
           w = stack.pop();
-          if (w) {
+          if (w !== undefined) {
             onStack.delete(w);
             comp.push(w);
           }
-        } while (w !== v);
+        } while (w !== v && w !== undefined);
         sccs.push(comp);
       }
     };

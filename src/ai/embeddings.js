@@ -1,141 +1,85 @@
+// src/ai/embeddings.js
 // @ts-check
-import crypto from 'node:crypto';
 
 /**
- * @typedef {import('../../types/ai.js').ILocalEmbeddingEngine} ILocalEmbeddingEngine
+ * @typedef {import('../../types/index.js').ILocalEmbeddingEngine} ILocalEmbeddingEngine
  */
 
 /**
- * Generates a deterministic 384-dimensional L2-normalized float array for fallback scenarios.
- * @param {string} text
- * @param {number} [dim]
- * @returns {number[]}
+ * Вычисляет косинусную близость двух векторов одинаковой размерности.
+ * @param {number[]} vecA
+ * @param {number[]} vecB
+ * @returns {number}
  */
-export function generateDeterministicVector(text, dim = 384) {
-  const hash = crypto.createHash('sha256').update(String(text)).digest();
-  let seed = hash.readUInt32LE(0) ^ hash.readUInt32LE(4) ^ hash.readUInt32LE(8);
-  const prng = () => {
-    seed |= 0;
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-
-  const vector = new Array(dim);
-  let sumSq = 0;
-  for (let i = 0; i < dim; i++) {
-    const val = prng() * 2 - 1;
-    vector[i] = val;
-    sumSq += val * val;
+export function cosineSimilarity(vecA, vecB) {
+  if (!vecA?.length || !vecB?.length || vecA.length !== vecB.length) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
   }
-  const norm = Math.sqrt(sumSq) || 1;
-  for (let i = 0; i < dim; i++) {
-    vector[i] = vector[i] / norm;
-  }
-  return vector;
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom > 0 ? dot / denom : 0;
 }
 
 /**
+ * Боевой генератор эмбеддингов на базе ONNX Runtime (@huggingface/transformers).
  * @implements {ILocalEmbeddingEngine}
  */
 export class LocalEmbeddingEngine {
   /**
-   * @param {object} [options]
-   * @param {string} [options.modelName]
-   * @param {string} [options.cacheDir]
-   * @param {[number, number, number]} [options.weights]
+   * @param {{ modelName?: string; cacheDir?: string; hfToken?: string; weights?: [number, number, number] }} [opts]
    */
-  constructor(options = {}) {
-    this.modelName = options.modelName || 'Xenova/multilingual-e5-small';
-    this.cacheDir = options.cacheDir || './.cache/transformers';
-    this.weights = options.weights || [0.5, 0.3, 0.2];
+  constructor(opts = {}) {
+    this.modelName = opts.modelName || 'Xenova/multilingual-e5-small';
+    this.cacheDir = opts.cacheDir || './.spectra/models';
+    this.hfToken = opts.hfToken;
+    /** @type {[number, number, number]} */
+    this.weights = opts.weights || [0.5, 0.3, 0.2];
     /** @type {any} */
-    this.pipelineInstance = null;
-    this.initialized = false;
+    this.extractor = null;
   }
 
-  /**
-   * Initializes local embedding model or falls back gracefully to deterministic hashing.
-   * @returns {Promise<this>}
-   */
   async init() {
-    if (this.initialized) {
-      return this;
+    if (this.extractor) return this;
+    if (this.hfToken && !process.env.HF_TOKEN) {
+      process.env.HF_TOKEN = this.hfToken;
     }
-    try {
-      const { pipeline } = await import('@huggingface/transformers');
-      this.pipelineInstance = await pipeline('feature-extraction', this.modelName, {
-        cache_dir: this.cacheDir
-      });
-    } catch {
-      // Graceful fallback when pipeline cannot be loaded (offline/sandbox/missing native libs)
-      this.pipelineInstance = null;
-    }
-    this.initialized = true;
+    const { pipeline, env } = await import('@huggingface/transformers');
+    env.cacheDir = this.cacheDir;
+    this.extractor = await pipeline('feature-extraction', this.modelName, { dtype: 'q8' });
     return this;
   }
 
   /**
-   * Embeds single text query into 384-dimensional normalized vector.
    * @param {string} text
    * @returns {Promise<number[]>}
    */
   async embedText(text) {
-    if (!this.initialized) {
-      await this.init();
-    }
-
-    if (this.pipelineInstance) {
-      try {
-        const output = await this.pipelineInstance(text, { pooling: 'mean', normalize: true });
-        const raw = Array.from(output.data);
-        if (raw.length === 384) {
-          return raw;
-        }
-        if (raw.length > 384) {
-          const sliced = raw.slice(0, 384);
-          const norm = Math.hypot(...sliced) || 1;
-          return sliced.map((x) => x / norm);
-        }
-      } catch {
-        // Fallback to deterministic generation if pipeline execution fails
-      }
-    }
-
-    return generateDeterministicVector(text, 384);
+    await this.init();
+    const output = await this.extractor(`query: ${text}`, { pooling: 'mean', normalize: true });
+    /** @type {number[]} */
+    const rawValues = Array.from(output.data);
+    return rawValues.map((v) => Number(Number(v).toFixed(6)));
   }
 
   /**
-   * Computes multi-modal incident vector v_inc by combining error, markov blanket, and schema.
-   * Weighted by [w0, w1, w2] and normalized.
-   * @param {object} params
-   * @param {string} params.errorText
-   * @param {string} params.markovBlanketSignature
-   * @param {string} params.stateSchemaSignature
+   * Вычисляет составной вектор тупика v_inc в R^384 (Определение 8).
+   * @param {{ errorText: string; markovBlanketSignature: string; stateSchemaSignature: string }} params
    * @returns {Promise<number[]>}
    */
   async computeIncidentVector({ errorText, markovBlanketSignature, stateSchemaSignature }) {
-    const [w0, w1, w2] = this.weights;
-    const [vErr, vMarkov, vSchema] = await Promise.all([
-      this.embedText(errorText || ''),
-      this.embedText(markovBlanketSignature || ''),
-      this.embedText(stateSchemaSignature || '')
+    const [eErr, eTopo, eSchema] = await Promise.all([
+      this.embedText(errorText),
+      this.embedText(markovBlanketSignature),
+      this.embedText(stateSchemaSignature)
     ]);
-
-    const combined = new Array(384);
-    let sumSq = 0;
-    for (let i = 0; i < 384; i++) {
-      const val = w0 * vErr[i] + w1 * vMarkov[i] + w2 * vSchema[i];
-      combined[i] = val;
-      sumSq += val * val;
-    }
-
-    const norm = Math.sqrt(sumSq) || 1;
-    for (let i = 0; i < 384; i++) {
-      combined[i] = combined[i] / norm;
-    }
-
-    return combined;
+    const [a, b, g] = this.weights;
+    const combined = eErr.map((val, i) => a * val + b * (eTopo[i] || 0) + g * (eSchema[i] || 0));
+    const norm = Math.hypot(...combined) || 1;
+    return combined.map((v) => Number((v / norm).toFixed(6)));
   }
 }

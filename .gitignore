@@ -1,3 +1,6 @@
 node_modules/
-.cache/
+.env
+.spectra/
 *.log
+npm-debug.log*
+.DS_Store

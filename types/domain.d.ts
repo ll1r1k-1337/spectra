@@ -1,15 +1,23 @@
 export type NodeType = 'llm' | 'tool' | 'branch' | 'join' | 'check' | 'macro' | 'fused';
 export type IdempotencyClass = 'pure' | 'idempotent' | 'non_idempotent';
 export type ModelTier = 'local_slm' | 'light' | 'frontier';
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
 export type DeadlockType =
   | 'NO_VALID_TRANSITION'
   | 'STATE_HASH_LOOP'
   | 'CHECK_FAILED'
   | 'TOOL_EXECUTION_ERROR'
-  | 'HARD_LIMIT_EXCEEDED'
-  | 'INVALID_GOAL_STATE';
+  | 'HARD_LIMIT_EXCEEDED';
 
 export type StateObject = Record<string, any>;
+
+export interface StateDiffEntry {
+  key: string;
+  change: 'ADDED' | 'MODIFIED' | 'REMOVED';
+  before: any;
+  after: any;
+}
 
 export interface JsonSchemaProperty {
   type: 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array';
@@ -50,9 +58,46 @@ export interface GraphEdgeSpec {
   intervals?: Record<string, [number, number]>;
 }
 
+export interface SerializedGraph {
+  id: string;
+  startNode: string | null;
+  goalNodes: string[];
+  nodes: Array<{
+    id: string;
+    type: NodeType;
+    reads: string[];
+    writes: string[];
+    idempotency?: IdempotencyClass;
+    hasBarrier?: boolean;
+    modelTier?: ModelTier;
+    config?: {
+      prompt?: string;
+      sourceCode?: string;
+      assertExpr?: string;
+      toolId?: string;
+    };
+  }>;
+  edges: Array<{
+    from: string;
+    to: string;
+    priority: number;
+    guardExpr: string;
+    intervals?: Record<string, [number, number]>;
+  }>;
+}
+
+export interface SerializedOntologyKey {
+  keyName: string;
+  status: 'STAGING' | 'CANONICAL';
+  canonicalAlias?: string;
+  epochsLived: number;
+  mutualInfoGain: number;
+}
+
 export interface DeadlockIncident {
   type: DeadlockType;
   nodeId: string;
+  lastValidNodeId?: string | null;
   step: number;
   error?: string;
   stateSnapshot: StateObject;
@@ -71,6 +116,20 @@ export interface MutationPlan {
   reasoning?: string;
 }
 
+export interface PrecedentRecord {
+  precedentId?: string;
+  deadlockType: DeadlockType;
+  incidentVector?: number[];
+  similarity?: number;
+  anchorReads: string[];
+  anchorWrites: string[];
+  mutationPlan: MutationPlan;
+  successCount?: number;
+  failureCount?: number;
+  confidenceLcb?: number;
+  isAntipattern: boolean;
+}
+
 export interface System1Verdict {
   driftRisk: number;
   coherence: number;
@@ -78,12 +137,16 @@ export interface System1Verdict {
   approved: boolean;
   rollbackAction: 'keep' | 'rollback_last' | 'rollback_session';
   selectedPrecedentId?: string | null;
+  latencyMs?: number;
 }
 
 export interface VerificationReport {
   status: 'PASS' | 'HARD_REJECT';
   omegaPenalty: number;
   diagnostics: {
+    vertexCount: number;
+    edgeCount: number;
+    density: number;
     priorityCollisions: number;
     deadNodes: string[];
     unsatNodes: string[];
@@ -92,22 +155,42 @@ export interface VerificationReport {
 }
 
 export interface SessionRunResult {
+  sessionId: string;
   goalReached: boolean;
   reason?: string;
   steps: number;
   rollbacksCount: number;
   finalState: StateObject;
   omegaPenalty?: number;
+  durationMs: number;
+  llmCalls: number;
   appliedMutations: Array<{
     deadlock: DeadlockIncident;
     mutationPlan: MutationPlan;
     omegaPenalty: number;
+    source: 'MEMORY_GROUNDED' | 'SYSTEM2_SYNTHESIZED';
   }>;
+}
+
+export interface CredentialsOverrides {
+  apiKey?: string;
+  baseUrl?: string;
+  frontierModel?: string;
+  lightModel?: string;
+  pgUrl?: string;
+  hfToken?: string;
+  layaCacheDir?: string;
+  layaModelDir?: string;
 }
 
 export interface SpectraConfig {
   systemName: string;
-  logLevel?: 'debug' | 'info' | 'warn' | 'error' | 'silent';
+  logging: {
+    level: LogLevel;
+    traceStateDiffs: boolean;
+    traceGuards: boolean;
+    jsonlFilePath: string;
+  };
   database: {
     connectionString: string;
     embeddingDimension: number;
@@ -116,26 +199,29 @@ export interface SpectraConfig {
     provider: 'transformers.js';
     modelName: string;
     cacheDir: string;
+    hfToken?: string;
     modalityWeights: [number, number, number];
   };
   system1: {
-    provider: 'laya-onnx';
-    confidenceThreshold: number;
-    driftTolerance: number;
+    provider: '@receptron/laya';
+    cacheDir?: string;
+    modelDir?: string;
+    hfToken?: string;
+    temperaturePlatt: number;
+    maxDrift: number;
+    minCoherence: number;
+    minApproveProb: number;
   };
   system2: {
-    provider: 'langchain';
-    openaiApiKey?: string;
-    baseURL?: string;
-    modelName: string;
-    lightModelName: string;
-    temperature: number;
-    maxTokens: number;
+    provider: 'openai';
+    apiKey: string;
+    baseUrl?: string;
+    frontierModel: string;
+    lightModel: string;
   };
   runtime: {
-    maxSteps: number;
-    rhoMax: number;
-    lMax: number;
-    initialLyapunovBank: number;
+    hardStepLimit: number;
+    stateHashLoopThreshold: number;
+    pprTeleportAlpha: number;
   };
 }
