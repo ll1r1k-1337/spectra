@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // @ts-check
 import fsSync from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
 import { SpectraLogger } from '../src/cli/logger.js';
 import { runInteractiveWizard } from '../src/cli/wizard.js';
@@ -16,12 +19,50 @@ import { StateOntologyManager } from '../src/core/ontology.js';
 import { SpectraRuntime } from '../src/core/runtime.js';
 
 /**
+ * Host-инструмент: материализует state.artifacts на диск и проверяет синтаксис .js.
+ * Защита от path traversal: любой путь обязан остаться внутри baseDir.
+ * @param {{ artifacts?: Array<{ name?: string, content?: string }> }} state
+ * @param {string} [baseDir]
+ */
+export async function persistArtifactsToDisk(state, baseDir = process.cwd()) {
+  const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
+  const root = path.resolve(baseDir);
+  /** @type {string[]} */ const persistedFiles = [];
+  /** @type {string[]} */ const syntaxErrors = [];
+  for (const a of artifacts) {
+    if (!a || typeof a.name !== 'string' || typeof a.content !== 'string') continue;
+    const rel = a.name.replace(/\\/g, '/').replace(/^\/+/, '');
+    const target = path.resolve(root, rel);
+    if (target !== root && !target.startsWith(root + path.sep)) {
+      throw new Error(`Security violation: artifact path "${a.name}" escapes workspace directory`);
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, a.content, 'utf8');
+    await fs.stat(target);
+    persistedFiles.push(rel);
+    if (rel.endsWith('.js')) {
+      try {
+        new vm.Script(a.content);
+      } catch (e) {
+        syntaxErrors.push(`${rel}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+  return { persistedFiles, syntaxErrors };
+}
+
+/** @type {Map<string, (state: import('../types/index.js').StateObject) => Promise<object>>} */
+export const HOST_TOOLS = new Map([
+  ['persist_artifacts_to_disk', (state) => persistArtifactsToDisk(state)]
+]);
+
+/**
  * Создает базовый стартовый граф G_0.
  */
 export function buildInitialGraph() {
   const graph = new DirectedGraph('session_graph');
   const goalPredicate =
-    'Boolean(Array.isArray(state.artifacts) && state.artifacts.length > 0 && String((state.artifacts[0] || {}).content || "").trim().length >= 1)';
+    '(state) => Boolean(Array.isArray(state.artifacts) && state.artifacts.length > 0 && state.artifacts.every((a) => a && String(a.name || "").trim().length > 0 && String(a.content || "").trim().length > 0) && Array.isArray(state.persistedFiles) && state.persistedFiles.length === state.artifacts.length && Array.isArray(state.syntaxErrors) && state.syntaxErrors.length === 0)';
   graph
     .addNode({
       id: 'start',
@@ -33,9 +74,27 @@ export function buildInitialGraph() {
       }
     })
     .addNode({
+      id: 'acquire_artifacts',
+      type: 'llm',
+      reads: ['goal'],
+      writes: ['artifacts', 'summary'],
+      config: {
+        prompt: 'Produce the real deliverable that satisfies the goal. Return artifacts as an array of {name, content} entries with actual generated code/files, and a short summary of what was produced.'
+      }
+    })
+    .addNode({
+      id: 'persist_artifacts',
+      type: 'tool',
+      reads: ['artifacts'],
+      writes: ['persistedFiles', 'syntaxErrors'],
+      config: {
+        toolId: 'persist_artifacts_to_disk'
+      }
+    })
+    .addNode({
       id: 'verify_goal_state',
       type: 'check',
-      reads: ['artifacts'],
+      reads: ['artifacts', 'persistedFiles', 'syntaxErrors'],
       writes: [],
       config: {
         assertExpr: goalPredicate
@@ -53,8 +112,14 @@ export function buildInitialGraph() {
 
   graph.startNode = 'start';
   graph.goalNodes.add('goal');
-  graph.addEdge('start', 'verify_goal_state', graph.compileGuardExpression('Boolean(state.initialized)'), 1, {
+  graph.addEdge('start', 'acquire_artifacts', graph.compileGuardExpression('Boolean(state.initialized)'), 1, {
     expr: 'Boolean(state.initialized)'
+  });
+  graph.addEdge('acquire_artifacts', 'persist_artifacts', graph.compileGuardExpression('true'), 1, {
+    expr: 'true'
+  });
+  graph.addEdge('persist_artifacts', 'verify_goal_state', graph.compileGuardExpression('true'), 1, {
+    expr: 'true'
   });
   graph.addEdge('verify_goal_state', 'goal', graph.compileGuardExpression(goalPredicate), 1, {
     expr: goalPredicate
@@ -117,6 +182,7 @@ async function handleRunCommand(goalText, overrides, flags) {
       embedder,
       system1Arbiter: sys1,
       system2Arbiter: sys2,
+      hostTools: HOST_TOOLS,
       config: config.runtime
     });
 

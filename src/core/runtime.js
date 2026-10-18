@@ -38,6 +38,7 @@ export class SpectraRuntime {
    *   embedder?: ILocalEmbeddingEngine | null;
    *   system1Arbiter?: ILayaSystem1Arbiter | null;
    *   system2Arbiter?: ILangChainSystem2Arbiter | null;
+   *   hostTools?: Map<string, (state: StateObject) => Promise<object>> | null;
    *   config?: Partial<import('../../types/index.js').SpectraConfig['runtime']>;
    * }} params
    */
@@ -51,6 +52,7 @@ export class SpectraRuntime {
     embedder = null,
     system1Arbiter = null,
     system2Arbiter = null,
+    hostTools = null,
     config = {}
   }) {
     this.graph = graph;
@@ -62,6 +64,7 @@ export class SpectraRuntime {
     this.embedder = embedder;
     this.system1Arbiter = system1Arbiter;
     this.system2Arbiter = system2Arbiter;
+    this.hostTools = hostTools;
     this.maxSteps = config.hardStepLimit ?? 50;
     this.loopThreshold = config.stateHashLoopThreshold ?? 2;
     this.alphaPpr = config.pprTeleportAlpha ?? 0.15;
@@ -289,7 +292,10 @@ export class SpectraRuntime {
             const toolId = node.config?.toolId || node.id;
             const tool = this.toolRegistry.tools.get(toolId);
             let rawOut = state;
-            if (tool?.sourceCode) {
+            const hostTool = this.hostTools ? this.hostTools.get(toolId) : undefined;
+            if (hostTool) {
+              rawOut = /** @type {StateObject} */ (await hostTool(state));
+            } else if (tool?.sourceCode) {
               rawOut = this.toolRegistry.executeSandboxed(tool.sourceCode, state);
             } else if (typeof node.config?.sourceCode === 'string') {
               rawOut = this.toolRegistry.executeSandboxed(node.config.sourceCode, state);
@@ -562,7 +568,9 @@ export class SpectraRuntime {
 
         if (deadlock.type === 'CHECK_FAILED' && deadlock.lastValidNodeId) {
           const checkReads = node?.reads && node.reads.length > 0 ? node.reads : ['artifacts'];
-          const preGuardExpr = checkReads.map((k) => `!Boolean(state.${k})`).join(' || ');
+          const preGuardExpr = checkReads
+          .map((k) => `!(Array.isArray(state.${k}) ? state.${k}.length > 0 : Boolean(state.${k}))`)
+          .join(' || ');
           candidateGraph.addEdge(
             deadlock.lastValidNodeId,
             mutationPlan.node.id,
