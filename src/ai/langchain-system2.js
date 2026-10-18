@@ -136,9 +136,9 @@ export class LangChainSystem2Arbiter {
     const structured = model.withStructuredOutput(OutputSchema);
 
     const inputSlice = Object.fromEntries(node.reads.map((k) => [k, state[k]]));
-    const promptText =
-      node.config?.prompt ||
-      `Compute output keys [${node.writes.join(', ')}] given input state ${JSON.stringify(inputSlice)}.`;
+    const promptText = (node.config?.prompt || `Compute output keys [${node.writes.join(', ')}].`) + '\n\nInputs (JSON):\n' + JSON.stringify(inputSlice, null, 2);
+      // (previously: node.config?.prompt || ... — dropped the input slice, so the model never saw the goal)
+      // Inputs (JSON) with the goal are appended to every llm-node prompt.
 
     const out = await structured.invoke(promptText);
     if (node.writes.includes('artifacts')) {
@@ -149,6 +149,21 @@ export class LangChainSystem2Arbiter {
         );
       }
     }
-    return out;
+    if (node.writes.includes('artifacts')) {
+ const artsCheck = /** @type {any} */ (out)?.artifacts;
+ const refusalArtifact = Array.isArray(artsCheck)
+ ? artsCheck.find((a) =>
+ /no goal|nothing to build|no (?:repo|file|spec|request)[^.\n]{0,20}(?:given|provided|supplied)|blocked:|what(?:'s| is) the goal|what should exist/i.test(
+ String(a?.content || '')
+ )
+ )
+ : null;
+ if (refusalArtifact) {
+ throw new Error(
+ `LLM node "${node.id}" вернул отказ вместо артефакта ("${String(refusalArtifact.name)}") - цель не выполнена`
+ );
+ }
+ }
+ return out;
   }
 }

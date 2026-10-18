@@ -79,7 +79,12 @@ export function buildInitialGraph() {
       reads: ['goal'],
       writes: ['artifacts', 'summary'],
       config: {
-        prompt: 'Produce the real deliverable that satisfies the goal. Return artifacts as an array of {name, content} entries with actual generated code/files, and a short summary of what was produced.'
+        prompt:
+      'You are the execution node. The session goal is given in Inputs (JSON) under "goal". ' +
+      'Produce the REAL, COMPLETE, runnable deliverable that satisfies that goal as code/files ' +
+      '(e.g. index.html, main.js, shaders.glsl where appropriate). ' +
+      'Return artifacts as an array of { name, content } entries, plus a short summary. ' +
+      'Never ask questions and never return a placeholder, a "blocked" note, or a "no goal given" message — the goal IS provided.'
       }
     })
     .addNode({
