@@ -10,13 +10,61 @@ export type DeadlockType =
   | 'TOOL_EXECUTION_ERROR'
   | 'HARD_LIMIT_EXCEEDED';
 
-export type StateObject = Record<string, any>;
+export interface StateObject {
+  [key: string]: any;
+  goal?: string;
+  artifacts?: Artifact[];
+  patches?: ArtifactPatch[];
+  workspaceFiles?: WorkspaceFile[];
+  persistedFiles?: string[];
+  syntaxErrors?: string[];
+}
 
 export interface StateDiffEntry {
   key: string;
   change: 'ADDED' | 'MODIFIED' | 'REMOVED';
   before: any;
   after: any;
+}
+
+export interface Artifact {
+  name: string;
+  content: string;
+}
+
+export interface ArtifactPatch {
+  file: string;
+  search: string;
+  replace: string;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  size: number;
+  ext: string;
+  content?: string;
+  contentTruncated?: boolean;
+}
+
+export interface RegisteredTool {
+  id: string;
+  reads: string[];
+  writes: string[];
+  sourceCode: string;
+  version?: number;
+  hasIrreversibleBarrier?: boolean;
+  sagaCompensatorCode?: string;
+  regressionPool?: Array<{ input: StateObject; expectedOutput: StateObject }>;
+}
+
+export interface MacroPattern {
+  id?: string;
+  name: string;
+  sourceNodeIds: string[];
+  targetNodeId?: string;
+  patternJson: Record<string, any>;
+  support?: number;
+  successRate?: number;
 }
 
 export interface JsonSchemaProperty {
@@ -75,6 +123,7 @@ export interface SerializedGraph {
       sourceCode?: string;
       assertExpr?: string;
       toolId?: string;
+      chain?: string[];
     };
   }>;
   edges: Array<{

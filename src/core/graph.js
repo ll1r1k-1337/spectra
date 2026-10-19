@@ -242,6 +242,186 @@ export class DirectedGraph {
     return this;
   }
 
+  /**
+   * Fuses maximal linear chains of tool nodes into single 'fused' nodes.
+   * @returns {number}
+   */
+  fuseLinearToolChains() {
+    /** @type {Map<string, Array<{ from: string, edge: GraphEdgeSpec }>>} */
+    const incoming = new Map();
+    for (const [from, list] of this.edges.entries()) {
+      for (const edge of list) {
+        if (!incoming.has(edge.to)) incoming.set(edge.to, []);
+        const bucket = incoming.get(edge.to);
+        if (bucket) bucket.push({ from, edge });
+      }
+    }
+
+    /** @param {string} id */
+    const isFusableTool = (id) => {
+      const node = this.nodes.get(id);
+      if (!node || node.type !== 'tool') return false;
+      if (id === this.startNode || this.goalNodes.has(id)) return false;
+      if (typeof node.config?.sourceCode !== 'string') return false;
+      return (this.edges.get(id) || []).length === 1;
+    };
+
+    /** @type {string[][]} */
+    const chains = [];
+    /** @type {Set<string>} */
+    const used = new Set();
+    for (const id of Array.from(this.nodes.keys()).sort()) {
+      if (!isFusableTool(id) || used.has(id)) continue;
+      const preds = incoming.get(id) || [];
+      if (preds.length === 1 && isFusableTool(preds[0].from)) {
+        const predOut = this.edges.get(preds[0].from) || [];
+        if (predOut.length === 1 && predOut[0].to === id) continue;
+      }
+
+      const chain = [id];
+      let current = id;
+      while (true) {
+        const out = this.edges.get(current) || [];
+        if (out.length !== 1) break;
+        const next = out[0].to;
+        const nextIn = incoming.get(next) || [];
+        if (!isFusableTool(next) || nextIn.length !== 1 || nextIn[0].from !== current) break;
+        if (chain.includes(next)) break;
+        chain.push(next);
+        current = next;
+      }
+      if (chain.length >= 2 && !chain.some((cid) => used.has(cid))) {
+        chains.push(chain);
+        chain.forEach((cid) => used.add(cid));
+      }
+    }
+
+    let fusedCount = 0;
+    for (const chain of chains) {
+      const first = chain[0];
+      const last = chain[chain.length - 1];
+      const firstNode = this.nodes.get(first);
+      const lastNode = this.nodes.get(last);
+      if (!firstNode || !lastNode) continue;
+
+      let valid = true;
+      for (let i = 0; i < chain.length - 1; i++) {
+        const out = this.edges.get(chain[i]) || [];
+        if (out.length !== 1 || out[0].to !== chain[i + 1]) {
+          valid = false;
+          break;
+        }
+      }
+      const lastOut = this.edges.get(last) || [];
+      if (!valid || lastOut.length !== 1) continue;
+
+      const fusedId = `fused_${first}_${last}`;
+      if (this.nodes.has(fusedId)) continue;
+
+      const incomingEdges = incoming.get(first) || [];
+      const successorEdge = lastOut[0];
+      const reads = Array.from(new Set(firstNode.reads));
+      const writes = Array.from(new Set(lastNode.writes));
+
+      for (const cid of chain) {
+        this.nodes.delete(cid);
+        this.edges.delete(cid);
+      }
+      for (const cid of chain) {
+        for (const [from, list] of this.edges.entries()) {
+          if (chain.includes(from)) continue;
+          this.edges.set(
+            from,
+            list.filter((e) => e.to !== cid)
+          );
+        }
+      }
+
+      this.addNode({
+        id: fusedId,
+        type: 'fused',
+        reads,
+        writes,
+        config: { chain: [...chain] }
+      });
+
+      for (const { from, edge } of incomingEdges) {
+        if (chain.includes(from)) continue;
+        this.addEdge(from, fusedId, edge.guard, edge.priority, {
+          expr: edge.guardExpr,
+          intervals: edge.intervals
+        });
+      }
+      this.addEdge(fusedId, successorEdge.to, successorEdge.guard, successorEdge.priority, {
+        expr: successorEdge.guardExpr,
+        intervals: successorEdge.intervals
+      });
+      fusedCount++;
+    }
+    return fusedCount;
+  }
+
+  /**
+   * Removes non-goal nodes unreachable from start or unable to reach a goal.
+   * @returns {number}
+   */
+  pruneDeadBranches() {
+    if (this.goalNodes.size === 0 || !this.startNode) return 0;
+
+    /** @type {Set<string>} */
+    const reachable = new Set();
+    /** @type {string[]} */
+    const stack = [this.startNode];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (!id || reachable.has(id)) continue;
+      reachable.add(id);
+      for (const edge of this.edges.get(id) || []) stack.push(edge.to);
+    }
+
+    /** @type {Map<string, string[]>} */
+    const reverse = new Map();
+    for (const [from, list] of this.edges.entries()) {
+      for (const edge of list) {
+        if (!reverse.has(edge.to)) reverse.set(edge.to, []);
+        const bucket = reverse.get(edge.to);
+        if (bucket) bucket.push(from);
+      }
+    }
+
+    /** @type {Set<string>} */
+    const canReachGoal = new Set();
+    /** @type {string[]} */
+    const queue = Array.from(this.goalNodes);
+    while (queue.length > 0) {
+      const id = queue.pop();
+      if (!id || canReachGoal.has(id)) continue;
+      canReachGoal.add(id);
+      for (const from of reverse.get(id) || []) queue.push(from);
+    }
+
+    /** @type {string[]} */
+    const dead = [];
+    for (const id of this.nodes.keys()) {
+      if (id === this.startNode || this.goalNodes.has(id)) continue;
+      if (!reachable.has(id) || !canReachGoal.has(id)) dead.push(id);
+    }
+
+    for (const id of dead) {
+      this.nodes.delete(id);
+      this.edges.delete(id);
+      for (const [from, list] of this.edges.entries()) {
+        if (list.some((e) => e.to === id)) {
+          this.edges.set(
+            from,
+            list.filter((e) => e.to !== id)
+          );
+        }
+      }
+    }
+    return dead.length;
+  }
+
   computeStructuralHash() {
     const payload = JSON.stringify({
       nodes: Array.from(this.nodes.entries())
@@ -275,7 +455,8 @@ export class DirectedGraph {
           prompt: n.config?.prompt,
           sourceCode: n.config?.sourceCode,
           assertExpr: n.config?.assertExpr,
-          toolId: n.config?.toolId
+          toolId: n.config?.toolId,
+          chain: n.config?.chain
         }
       })),
       edges: Array.from(this.edges.entries()).flatMap(([, list]) =>
@@ -313,7 +494,8 @@ export class DirectedGraph {
           prompt: n.config?.prompt,
           sourceCode: n.config?.sourceCode,
           assertExpr: n.config?.assertExpr,
-          toolId: n.config?.toolId
+          toolId: n.config?.toolId,
+          chain: n.config?.chain
         }
       });
     }

@@ -80,18 +80,27 @@ export class LangChainSystem2Arbiter {
     const model = this._createChatModel('frontier');
     const structured = model.withStructuredOutput(MutationSchema);
 
-    const res = await structured.invoke(
+    const snapshot = deadlock.stateSnapshot || {};
+ const diagnostics = {
+ syntaxErrors: Array.isArray(snapshot.syntaxErrors) ? snapshot.syntaxErrors : [],
+ persistedFiles: Array.isArray(snapshot.persistedFiles) ? snapshot.persistedFiles : [],
+ artifacts: Array.isArray(snapshot.artifacts) ? snapshot.artifacts.map((a) => a && a.name) : [],
+ workspaceFiles: Array.isArray(snapshot.workspaceFiles) ? snapshot.workspaceFiles.map((f) => f && f.path) : []
+ };
+
+ const res = await structured.invoke(
       `You are the System-2 Meta-Arbiter of the Spectra self-learning graph runtime.\n` +
         `Session Goal: "${goalDescription}".\n` +
         `Existing Graph Nodes: [${existingNodeIds.join(', ')}]. Terminal Goal Node: "${goalNodeId}".\n` +
         `Deadlock Incident: type="${deadlock.type}" at node="${deadlock.nodeId}" (predecessor="${deadlock.lastValidNodeId || 'start'}"), step=${deadlock.step}.\n` +
         `Error: "${deadlock.error || 'N/A'}".\n` +
-        `Current State Snapshot: ${JSON.stringify(deadlock.stateSnapshot)}.\n\n` +
+ `Diagnostics (names/paths only): ${JSON.stringify(diagnostics)}.\n\n` +
         `Requirements:\n` +
         `1. Set operator="addNodeAndBridge", from="${requiredFrom}", to="${requiredTo}", guardExpr="Boolean(Array.isArray(state.artifacts) && state.artifacts.length > 0)".\n` +
         `2. Set node.id="${expectedNodeId}", node.type="llm", node.reads=["goal"], node.writes=["artifacts", "summary"].\n` +
         `3. Set node.sourceCode to the PROMPT (a plain instruction string, not code) telling the node to actually produce the deliverable: return "artifacts" as an array of {name, content} with real generated content (source code / files) that satisfies the goal, plus a short "summary". Do NOT set goalCompleted. Example:\n` +
-        `   "Produce the real deliverable that satisfies the goal. Return artifacts as [{name, content}] with actual generated code/files, and a short summary of what was produced."\n`
+        `   "Produce the real deliverable that satisfies the goal. Return artifacts as [{name, content}] with actual generated code/files, and a short summary of what was produced."\n` +
+ `4. The repair node MUST produce valid, runnable output and MUST preserve path-safety: only relative paths inside the workspace, no absolute paths and no ".." traversal.\n`
     );
 
     const cleanSourceCode = res.node?.sourceCode
@@ -125,32 +134,41 @@ export class LangChainSystem2Arbiter {
    */
   async executeLlmNode(node, state, tier = 'frontier') {
     const model = this._createChatModel(tier);
+ const includeArtifacts = node.writes.includes('artifacts');
     /** @type {Record<string, z.ZodTypeAny>} */
-    const shape = {};
+ const shape = {};
     for (const wKey of node.writes) {
-      shape[wKey] = wKey === 'artifacts'
+      shape[wKey] = includeArtifacts && wKey === 'artifacts'
         ? z.array(z.object({ name: z.string(), content: z.string() })).min(1)
         : z.union([z.string(), z.number(), z.boolean()]);
     }
-    const OutputSchema = z.object(shape);
+    if (includeArtifacts) {
+ shape.patches = z.array(z.object({ file: z.string(), search: z.string(), replace: z.string() })).default([]);
+ }
+ const OutputSchema = z.object(shape);
     const structured = model.withStructuredOutput(OutputSchema);
 
-    const inputSlice = Object.fromEntries(node.reads.map((k) => [k, state[k]]));
+    const patchInstructions = includeArtifacts
+ ? '\n\nReturn at least one complete file in "artifacts" (new or fully rewritten). Optionally add "patches": exact { file, search, replace } search/replace edits to existing files from Inputs.workspaceFiles; patched files are written and merged automatically. Never list the same file in both artifacts and patches.'
+ : '';
+ const inputSlice = Object.fromEntries(node.reads.map((k) => [k, state[k]]));
     const promptText = (node.config?.prompt || `Compute output keys [${node.writes.join(', ')}].`) + '\n\nInputs (JSON):\n' + JSON.stringify(inputSlice, null, 2);
       // (previously: node.config?.prompt || ... — dropped the input slice, so the model never saw the goal)
       // Inputs (JSON) with the goal are appended to every llm-node prompt.
 
-    const out = await structured.invoke(promptText);
-    if (node.writes.includes('artifacts')) {
+    const out = await structured.invoke(promptText + patchInstructions);
       const arts = /** @type {any} */ (out)?.artifacts;
+ const patchList = /** @type {any} */ (out)?.patches;
+ if (includeArtifacts) {
       if (!Array.isArray(arts) || arts.length === 0) {
         throw new Error(
-          `LLM node "${node.id}" вернул пустой artifacts[] для цели "${String(state.goal || '')}" — требуется минимум один { name, content }`
+          `Empty LLM output: node "${node.id}" returned no artifacts` +
+            (Array.isArray(patchList) && patchList.length > 0 ? ' (patches alone are not a deliverable)' : '')
         );
       }
     }
-    if (node.writes.includes('artifacts')) {
- const artsCheck = /** @type {any} */ (out)?.artifacts;
+    if (includeArtifacts) {
+ const artsCheck = arts;
  const refusalArtifact = Array.isArray(artsCheck)
  ? artsCheck.find((a) =>
  /no goal|nothing to build|no (?:repo|file|spec|request)[^.\n]{0,20}(?:given|provided|supplied)|blocked:|what(?:'s| is) the goal|what should exist/i.test(

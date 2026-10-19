@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node ./bin/spectra.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --test ./test/e2e.test.js",
+    "test": "node --test ./test/*.test.js",
     "db:up": "docker compose up -d",
     "db:migrate": "docker compose exec -T postgres psql -U spectra -d spectra_db -f /docker-entrypoint-initdb.d/001_init_pgvector.sql",
     "init": "node ./bin/spectra.js init",

@@ -1,7 +1,7 @@
 // @ts-check
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildInitialGraph } from '../bin/spectra.js';
+import { buildInitialGraph, HOST_TOOLS } from '../bin/spectra.js';
 import { resolveSpectraConfig, assertValidLlmCredentials } from '../src/cli/credentials.js';
 import { GraphDeterminismVerifier } from '../src/core/verifier.js';
 import { ToolRegistry } from '../src/core/tools.js';
@@ -55,6 +55,7 @@ test('Spectra Real E2E (No Mocks): Real LLM Synthesis -> pgvector Experience Rep
       embedder,
       system1Arbiter: sys1,
       system2Arbiter: sys2,
+      hostTools: HOST_TOOLS,
       config: config.runtime
     });
 
@@ -86,9 +87,10 @@ test('Spectra Real E2E (No Mocks): Real LLM Synthesis -> pgvector Experience Rep
       embedder,
       system1Arbiter: sys1,
       system2Arbiter: sys2,
+      hostTools: HOST_TOOLS,
       // NOTE: Живое поведение LLM/DB предполагается. Ограничиваем лимит шагов,
       // чтобы принудительный тупик дал ровно одну мутацию восстановления.
-      config: { ...config.runtime, hardStepLimit: 4 }
+      config: { ...config.runtime, hardStepLimit: 6 }
     });
 
     // NOTE: Принудительно ломаем контракт цели, чтобы гарантированно войти в SLOW LOOP
@@ -98,7 +100,7 @@ test('Spectra Real E2E (No Mocks): Real LLM Synthesis -> pgvector Experience Rep
     const forcedCheck = runtime2.graph.nodes.get('verify_goal_state');
     assert.ok(forcedCheck, 'Узел verify_goal_state обязан существовать в G_0');
     if (forcedCheck) {
-      forcedCheck.config = { ...(forcedCheck.config || {}), assertExpr: '(state) => false' };
+      forcedCheck.config = { ...(forcedCheck.config || {}), assertExpr: '(state) => false', assertFn: () => false };
     }
 
     const goal2 = 'Сформировать аудиторский отчет по транзакциям';
@@ -157,7 +159,8 @@ test('Spectra Real E2E (No Mocks): Real LLM Synthesis -> pgvector Experience Rep
       precedentStore: store,
       embedder,
       system1Arbiter: sys1,
-      system2Arbiter: sys2
+      system2Arbiter: sys2,
+      hostTools: HOST_TOOLS
     });
 
     const trajectory = [
@@ -183,27 +186,35 @@ test('Spectra Real E2E (No Mocks): Real LLM Synthesis -> pgvector Experience Rep
     // =========================================================================
     runtime2.ontology.registerStagingKey('ephemeral_noise_key', 0.01);
     const activeSolver = Array.from(runtime2.graph.nodes.values()).find(
-      (n) => !['start', 'acquire_artifacts', 'persist_artifacts', 'verify_goal_state', 'goal'].includes(n.id)
+      (n) =>
+        !['start', 'scan_workspace', 'acquire_artifacts', 'persist_artifacts', 'verify_goal_state', 'goal'].includes(
+          n.id
+        )
     );
     assert.ok(activeSolver, 'Должен существовать синтезированный узел восстановления');
 
-    runtime2.graph.addNode({
-      id: 'solver_duplicate_branch',
-      type: 'tool',
-      reads: [...activeSolver.reads],
-      writes: [...activeSolver.writes],
-      config: { sourceCode: activeSolver.config?.sourceCode }
-    });
-    runtime2.graph.addEdge(
-      'start',
-      'solver_duplicate_branch',
-      runtime2.graph.compileGuardExpression('!((Array.isArray(state.artifacts) ? state.artifacts.length > 0 : Boolean(state.artifacts)))'),
-      2,
-      { expr: '!((Array.isArray(state.artifacts) ? state.artifacts.length > 0 : Boolean(state.artifacts)))' }
-    );
-    runtime2.graph.addEdge('solver_duplicate_branch', 'verify_goal_state', () => true, 1, {
-      expr: 'true /* reverify_check */'
-    });
+    // Две идентичные ветви с одинаковой сигнатурой — материал для foldBisimilarBranches.
+    for (const branchId of ['solver_duplicate_branch', 'solver_duplicate_branch_2']) {
+      runtime2.graph.addNode({
+        id: branchId,
+        type: 'tool',
+        reads: [...activeSolver.reads],
+        writes: [...activeSolver.writes],
+        config: { sourceCode: activeSolver.config?.sourceCode }
+      });
+      runtime2.graph.addEdge(
+        'start',
+        branchId,
+        runtime2.graph.compileGuardExpression(
+          '!((Array.isArray(state.artifacts) ? state.artifacts.length > 0 : Boolean(state.artifacts)))'
+        ),
+        2,
+        { expr: '!((Array.isArray(state.artifacts) ? state.artifacts.length > 0 : Boolean(state.artifacts)))' }
+      );
+      runtime2.graph.addEdge(branchId, 'verify_goal_state', () => true, 1, {
+        expr: 'true /* reverify_check */'
+      });
+    }
 
     const sleepRes = await runtime2.runConsolidationSleep();
     assert.ok(sleepRes.promotedKeys.some((k) => ['artifacts', 'persistedFiles'].includes(k)));

@@ -58,6 +58,12 @@ export interface IPrecedentStore {
   savePrecedent(record: PrecedentRecord, deadlock: DeadlockIncident): Promise<void>;
   saveGraphVersion(graphJson: SerializedGraph, structuralHash: string, omegaPenalty: number): Promise<void>;
   loadLatestGraph(): Promise<SerializedGraph | null>;
+  loadRegisteredTools?(): Promise<import('./domain.js').RegisteredTool[]>;
+  saveRegisteredTool?(tool: import('./domain.js').RegisteredTool): Promise<void>;
+  saveMacroPattern?(pattern: import('./domain.js').MacroPattern): Promise<void>;
+  calibratePrecedents?(): Promise<number>;
+  getStats?(): Promise<Record<string, any>>;
+  pruneMemory?(): Promise<Record<string, number>>;
   saveOntologyKeys(keys: SerializedOntologyKey[]): Promise<void>;
   loadOntologyKeys(): Promise<SerializedOntologyKey[]>;
   clearAll(): Promise<void>;

@@ -72,6 +72,8 @@ export interface IDirectedGraph {
   compileGuardExpression(exprStr?: string): (state: StateObject) => boolean;
   getCausalMarkovBlanket(centerNodeId: string, alphaPpr?: number): Map<string, number>;
   foldBisimilarBranches(): this;
+  fuseLinearToolChains(): number;
+  pruneDeadBranches(): number;
   computeStructuralHash(): string;
   toJSON(): SerializedGraph;
   clone(): IDirectedGraph;

@@ -197,6 +197,47 @@ export class SpectraLogger {
   }
 
   /**
+   * Компактное представление крупных полей состояния для терминала. Полный контент пишется только в JSONL.
+   * @param {string} key
+   * @param {any} value
+   * @returns {string}
+   */
+  _compactValue(key, value) {
+    if (key === 'artifacts' && Array.isArray(value)) {
+      const items = value.map(
+        (a) => `${String(a?.name ?? '?')} (${Buffer.byteLength(String(a?.content ?? ''), 'utf8')}B)`
+      );
+      return items.length <= 5 ? `[${items.join(', ')}]` : `[${items.slice(0, 5).join(', ')}… +${items.length - 5}]`;
+    }
+    if (key === 'workspaceFiles' && Array.isArray(value)) {
+      const paths = value.map((f) => String(f?.path ?? '?'));
+      return paths.length <= 8
+        ? `[${paths.length} files: ${paths.join(', ')}]`
+        : `[${paths.length} files: ${paths.slice(0, 8).join(', ')}…]`;
+    }
+    if (key === 'patches' && Array.isArray(value)) {
+      return `[${value.length} patches: ${value.map((p) => String(p?.file ?? '?')).join(', ')}]`;
+    }
+    const json = JSON.stringify(value);
+    return json && json.length > 1200 ? `${json.slice(0, 1200)}… (${json.length} chars)` : json;
+  }
+
+  /**
+   * @param {StateObject} state
+   * @returns {Record<string, string>}
+   */
+  _compactSnapshot(state) {
+    /** @type {Record<string, string>} */
+    const out = {};
+    for (const [key, value] of Object.entries(state || {})) {
+      out[key] = ['artifacts', 'workspaceFiles', 'patches'].includes(key)
+        ? this._compactValue(key, value)
+        : JSON.stringify(value) ?? 'undefined';
+    }
+    return out;
+  }
+
+  /**
    * @param {{ step: number; maxSteps: number; node: GraphNodeSpec; durationMs: number; stateBefore: StateObject; stateAfter: StateObject }} params
    */
   logStepExecution({ step, maxSteps, node, durationMs, stateBefore, stateAfter }) {
@@ -213,13 +254,17 @@ export class SpectraLogger {
       } else {
         for (const d of diffs) {
           if (d.change === 'ADDED') {
-            console.log(`  ${ANSI.green}↳ Δ State [+ADDED]    ${d.key}: ${JSON.stringify(d.after)}${ANSI.reset}`);
+            console.log(
+              ` ${ANSI.green}↳ Δ State [+ADDED] ${d.key}: ${this._compactValue(d.key, d.after)}${ANSI.reset}`
+            );
           } else if (d.change === 'MODIFIED') {
             console.log(
-              `  ${ANSI.yellow}↳ Δ State [~MODIFIED] ${d.key}: ${JSON.stringify(d.before)} ──► ${JSON.stringify(d.after)}${ANSI.reset}`
+              ` ${ANSI.yellow}↳ Δ State [~MODIFIED] ${d.key}: ${this._compactValue(d.key, d.before)} ──► ${this._compactValue(d.key, d.after)}${ANSI.reset}`
             );
           } else {
-            console.log(`  ${ANSI.red}↳ Δ State [-REMOVED]  ${d.key} (было: ${JSON.stringify(d.before)})${ANSI.reset}`);
+            console.log(
+              ` ${ANSI.red}↳ Δ State [-REMOVED] ${d.key} (было: ${this._compactValue(d.key, d.before)})${ANSI.reset}`
+            );
           }
         }
       }
@@ -271,7 +316,9 @@ export class SpectraLogger {
       .map(([id, score]) => `${id}(PPR=${score.toFixed(3)})`)
       .join(', ');
     console.log(`  ${ANSI.cyan}• Одеяло Маркова MB:${ANSI.reset} [${blanketEntries}]`);
-    console.log(`  ${ANSI.gray}• Слепок State:${ANSI.reset}      ${JSON.stringify(deadlock.stateSnapshot)}`);
+    console.log(
+      ` ${ANSI.gray}• Слепок State:${ANSI.reset} ${JSON.stringify(this._compactSnapshot(deadlock.stateSnapshot))}`
+    );
     this._writeJsonl('DEADLOCK', {
       deadlock,
       stateHash,

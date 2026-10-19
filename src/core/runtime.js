@@ -21,6 +21,7 @@ import { cosineSimilarity } from '../ai/embeddings.js';
  * @typedef {import('../../types/index.js').System1Verdict} System1Verdict
  * @typedef {import('../../types/index.js').SessionRunResult} SessionRunResult
  * @typedef {import('../../types/index.js').PrecedentRecord} PrecedentRecord
+ * @typedef {import('../../types/index.js').MacroPattern} MacroPattern
  */
 
 /**
@@ -361,6 +362,42 @@ export class SpectraRuntime {
               stateBefore,
               stateAfter: state
             });
+          } else if (node.type === 'fused') {
+            const chain = Array.isArray(node.config?.chain) ? node.config.chain : [];
+            if (chain.length === 0) {
+              throw new Error(`Fused node "${node.id}" has an empty config.chain`);
+            }
+            let chainState = structuredClone(stateBefore);
+            for (const memberId of chain) {
+              const tool = this.toolRegistry.tools.get(memberId);
+              const hostTool = this.hostTools ? this.hostTools.get(memberId) : undefined;
+              let ran = false;
+              let rawOut = chainState;
+              if (hostTool) {
+                rawOut = /** @type {StateObject} */ (await hostTool(chainState));
+                ran = true;
+              } else if (tool?.sourceCode) {
+                rawOut = this.toolRegistry.executeSandboxed(tool.sourceCode, chainState);
+                ran = true;
+              }
+              if (!ran) {
+                throw new Error(`Fused node "${node.id}": chain member "${memberId}" has no runnable code`);
+              }
+              chainState =
+                rawOut && typeof rawOut === 'object' ? { ...chainState, ...rawOut } : chainState;
+            }
+            state = chainState;
+            for (const wKey of node.writes) {
+              this.ontology.registerStagingKey(wKey, 0.25);
+            }
+            this.logger.logStepExecution({
+              step,
+              maxSteps: this.maxSteps,
+              node,
+              durationMs: performance.now() - stepStartMs,
+              stateBefore,
+              stateAfter: state
+            });
           } else if (node.type === 'llm') {
             this.llmCalls++;
             const llmDelta =
@@ -408,6 +445,19 @@ export class SpectraRuntime {
             this.graph.computeStructuralHash(),
             ver.omegaPenalty
           );
+        }
+        if (this.precedentStore) {
+          for (const applied of appliedMutations) {
+            const newNode = applied.mutationPlan.node;
+            if (newNode && typeof newNode.config?.sourceCode === 'string') {
+              await this.precedentStore.saveRegisteredTool?.({
+                id: newNode.id,
+                reads: newNode.reads,
+                writes: newNode.writes,
+                sourceCode: newNode.config.sourceCode
+              });
+            }
+          }
         }
         const durationMs = Number((performance.now() - startTimeMs).toFixed(2));
         this.logger.banner(
@@ -756,6 +806,59 @@ export class SpectraRuntime {
   }
 
   /**
+   * Returns maximal linear chains of tool nodes (length >= 2), deterministically ordered.
+   * @returns {string[][]}
+   */
+  _collectLinearToolChains() {
+    /** @type {Map<string, string[]>} */
+    const incoming = new Map();
+    for (const [from, list] of this.graph.edges.entries()) {
+      for (const edge of list) {
+        if (!incoming.has(edge.to)) incoming.set(edge.to, []);
+        const bucket = incoming.get(edge.to);
+        if (bucket) bucket.push(from);
+      }
+    }
+
+    /** @param {string} id */
+    const isLinearTool = (id) => {
+      const node = this.graph.nodes.get(id);
+      return Boolean(node && node.type === 'tool' && (this.graph.edges.get(id) || []).length === 1);
+    };
+
+    /** @type {string[][]} */
+    const chains = [];
+    /** @type {Set<string>} */
+    const used = new Set();
+    for (const id of Array.from(this.graph.nodes.keys()).sort()) {
+      if (!isLinearTool(id) || used.has(id)) continue;
+      const preds = incoming.get(id) || [];
+      if (preds.length === 1 && isLinearTool(preds[0])) {
+        const predOut = this.graph.edges.get(preds[0]) || [];
+        if (predOut.length === 1 && predOut[0].to === id) continue;
+      }
+
+      const chain = [id];
+      let current = id;
+      while (true) {
+        const out = this.graph.edges.get(current) || [];
+        if (out.length !== 1) break;
+        const next = out[0].to;
+        const nextIn = incoming.get(next) || [];
+        if (!isLinearTool(next) || nextIn.length !== 1 || nextIn[0] !== current) break;
+        if (chain.includes(next)) break;
+        chain.push(next);
+        current = next;
+      }
+      if (chain.length >= 2) {
+        chains.push(chain);
+        chain.forEach((cid) => used.add(cid));
+      }
+    }
+    return chains;
+  }
+
+  /**
    * Контур 3 (Consolidation Loop / «Фаза сна»).
    */
   async runConsolidationSleep() {
@@ -771,8 +874,51 @@ export class SpectraRuntime {
     const { promoted: promotedKeys, evicted: evictedKeys } = this.ontology.runStagingGarbageCollection(0.1);
     this.graph.foldBisimilarBranches();
 
-    const nodesAfter = this.graph.nodes.size;
-    const foldedNodes = nodesBefore - nodesAfter;
+    const nodesAfterFold = this.graph.nodes.size;
+    const foldedNodes = nodesBefore - nodesAfterFold;
+
+    const prunedNodes = this.graph.pruneDeadBranches();
+    const fusedChains = this.graph.fuseLinearToolChains();
+
+    /** @type {MacroPattern[]} */
+    const macroPatterns = [];
+    const fusedNodes = Array.from(this.graph.nodes.values()).sort((a, b) => a.id.localeCompare(b.id));
+    for (const node of fusedNodes) {
+      if (node.type !== 'fused') continue;
+      const chain = Array.isArray(node.config?.chain) ? node.config.chain : [];
+      if (chain.length < 2) continue;
+      macroPatterns.push({
+        name: `macro_${chain[0]}_${chain[chain.length - 1]}`.slice(0, 128),
+        sourceNodeIds: [...chain],
+        targetNodeId: chain[chain.length - 1],
+        patternJson: { chain: [...chain], reads: node.reads, writes: node.writes },
+        support: 1,
+        successRate: 0.5
+      });
+    }
+    for (const chain of this._collectLinearToolChains()) {
+      const firstNode = this.graph.nodes.get(chain[0]);
+      const lastNode = this.graph.nodes.get(chain[chain.length - 1]);
+      if (!firstNode || !lastNode) continue;
+      macroPatterns.push({
+        name: `macro_${chain[0]}_${chain[chain.length - 1]}`.slice(0, 128),
+        sourceNodeIds: [...chain],
+        targetNodeId: chain[chain.length - 1],
+        patternJson: { chain: [...chain], reads: firstNode.reads, writes: lastNode.writes },
+        support: 1,
+        successRate: 0.5
+      });
+    }
+
+    let macroPatternsSaved = 0;
+    if (this.precedentStore && typeof this.precedentStore.saveMacroPattern === 'function') {
+      for (const pattern of macroPatterns) {
+        await this.precedentStore.saveMacroPattern(pattern);
+        macroPatternsSaved++;
+      }
+    }
+    const calibratedPrecedents = (await this.precedentStore?.calibratePrecedents?.()) ?? 0;
+
     const verAfter = this.verifier.verify(this.graph);
     const omegaAfter = verAfter.omegaPenalty;
 
@@ -789,9 +935,23 @@ export class SpectraRuntime {
       promotedCanonicalKeys: promotedKeys,
       evictedStagingKeys: evictedKeys,
       foldedBisimilarNodes: foldedNodes,
+      prunedDeadNodes: prunedNodes,
+      fusedToolChains: fusedChains,
+      macroPatternsSaved,
+      calibratedPrecedents,
       omegaBefore,
       omegaAfter
     });
-    return { promotedKeys, evictedKeys, foldedNodes, omegaBefore, omegaAfter };
+    return {
+      promotedKeys,
+      evictedKeys,
+      foldedNodes,
+      prunedNodes,
+      fusedChains,
+      macroPatternsSaved,
+      calibratedPrecedents,
+      omegaBefore,
+      omegaAfter
+    };
   }
 }
